@@ -229,7 +229,10 @@ def heuristicX(board, wR, wN, wK, bK, bN):
 	if len(wR) > 0: #Check to see if white rook exists
 		score += whiteDefRook(board, wR, wK)*2
 		score += whiteRookAtk(board, wR, bK)
-		
+	#checking to see if the bksck knight is in play
+	# this should be in the wR loop whenever it compiles
+	if len(bN) > 0:
+		score += aggroWhiteRook(board,wR,bN,bK)
 	score += wkMove2bk(wK, bK)*3
 	score -= len(board.move_stack)
 	score += len(board.attacks(list(wK)[0]))	
@@ -249,7 +252,16 @@ def heuristicY(board, wR, wN, wK, bK, bN):
 	score += len(board.attacks(list(bK)[0]))
 	
 	return score
-	
+#im going to try and convey my logic even if it does not compile    
+def aggroWhiteRook(board, wr, bn, bk):
+#this will cover the cases where the black knight is on the left side of the king
+    #this does not cover the case where the king is close to the knight
+    if (chess.rank_index(list(bn)[0]) == chess.rank_index(list(bk)[0])) && (chess.file_index(list(bn)[0]) < chess.file_index(list(bk)[0])):
+        score += 500
+	# king is on the left side, now that i am thinking about it, it does not matter as long as the rook isnt within kill range
+	# want to add a high value if the king is unable to guard the enemy knight though since this position will be valuable		
+        return score	
+
 def whiteDefRook(board, wr, wk):
 	score = 0
 	guard = board.attackers(chess.WHITE, list(wk)[0])
