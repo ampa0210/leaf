@@ -4,7 +4,7 @@ import random
 import time
 from math import *
 from operator import itemgetter
-from multiprocessing import Pool as ThreadPool, Process, Array, Value, TimeoutError
+from multiprocessing import Pool as ThreadPool, Array, Value
 from ctypes import c_byte, c_int, c_ulonglong, Structure
 from os import cpu_count
 import copy
@@ -19,7 +19,6 @@ bKposition=[0, 1, 2, 2, 2, 2, 1, 0,
 			0, 1, 2, 2, 2, 2, 1, 0]
 
 MAX_INT = 100000
-MAX_TIME = 10
 DEPTH = 4
 UPPER = 0
 EXACT = 1
@@ -43,6 +42,7 @@ class EV_Item(Structure):
 
 EV_Table = Array(EV_Item, 16 * 1000000)
 TT_Table = Array(TT_Item, 16 * 1000000)
+BEST_SCORE = Value(c_int, -MAX_INT)
 
 def load_ev(key):
 	with EV_Table.get_lock():
@@ -86,7 +86,6 @@ def stockFish(board, time):
 	engine = chess.uci.popen_engine("stockfish\stockfish")
 	engine.position(board)
 	move = engine.go(movetime=time*1000)
-	engine.quit()
 	return move[0]
 
 def moveThreading(data):
@@ -94,64 +93,51 @@ def moveThreading(data):
 	#data[1] is the score
 	#data[2] is the depth
 	#data[3] is the board
-
-	if data[1] == None:
-		alpha = -MAX_INT
-		beta = MAX_INT
-	else:
-		alpha = -abs(data[1]) - 5
-		beta = abs(data[1]) + 5
+	with BEST_SCORE.get_lock():
+		best = BEST_SCORE.value
 
 	data[3].push(data[0])
-	data[1] = -negaScout(data[3], alpha, beta, data[2])
+	data[1] = -negaScout(data[3], -abs(best), MAX_INT, data[2])
 	data[3].pop()
 
-	if data[1] < alpha or data[1] > beta:
-		data[3].push(data[0])
-		data[1] = -negaScout(data[3], -MAX_INT, MAX_INT, data[2])
-		data[3].pop()
+	with BEST_SCORE.get_lock():
+		BEST_SCORE.value = max(best, data[1])
 
 	return data
 
-def search(board, start):
+def search(board):
+	# reset lower starting search window
+	BEST_SCORE.value = -MAX_INT
+
 	threadData = []
 	for i in board.legal_moves:
-		threadData.append([i, None, 0, board])
+		threadData.append([i, 0, 0, board])
 
-	threads = min(len(threadData), cpu_count()-1)
-	pool = ThreadPool(processes=threads)
-	moveList = []
-	for depth in range(0, 10):
+	threads = min(len(board.legal_moves), cpu_count() - 1)
+	for depth in range(0, DEPTH + 1):
 		# set the current depth to search
 		for i in range(len(threadData)):
 			threadData[i][2] = depth
+		pool = ThreadPool(processes=threads)
+		threadData = pool.map(moveThreading, threadData)
+		pool.close()
+		pool.join()
+		threadData = sorted(threadData, key=itemgetter(1), reverse=True)
 
-		result = pool.map_async(moveThreading, threadData)
-
-		try:
-			threadData = result.get(int(MAX_TIME - (time.time() - start)))
-			threadData = sorted(threadData, key=itemgetter(1), reverse=True)
-			moveList = [[item[0], item[1]] for item in threadData]
-		except TimeoutError:
-			pool.terminate()
-			pool.join()
-			pool = None
-			break
-
-		#pool.terminate()
-		#pool.join()
-		#pool = None
-
+	moveList = []
+	for item in threadData:
+		moveList.append([item[0], item[1]])
 	return moveList
 
 def computerPlayer(board):
+	#Call to get which move is best
 	board_copy = board
 	
 	#start move benchmark
 	start = time.time()
 	
 	#Multithreading start
-	moveList = search(board, start)
+	moveList = search(board)
 	
 	#Output move benchmark time
 	if board.turn == chess.WHITE:
@@ -171,7 +157,6 @@ def computerPlayer(board):
 			moveList[0][1] = moveList[0][1] - 50 #take away 50 points
 			print("THREE_FOLD_REPETITION")
 			moveList = sorted(moveList, key=itemgetter(1), reverse=True)
-			bestValue = moveList[0][1]
 		board_copy.pop()
 	
 	#Get index range of best moves
@@ -184,61 +169,19 @@ def computerPlayer(board):
 	print(moveList)
 	time.sleep(1)
 	return moveList[random.randrange(0, index)][0] #Return random best move
-
-def quiescence(board, alpha, beta):
-	score = evaluate(board)
-	if score >= beta:
-		return score
-	elif score > alpha:
-		alpha = score
-
-	for i in board.legal_moves:
-		if not board.is_capture(i):
-			continue
-		board.push(i)
-		score = -quiescence(board, -beta, -alpha)
-		board.pop()
-
-		if score >= beta:
-			return score
-		if score > alpha:
-			alpha = score
-	return alpha
-
-def isValid(board, move):
-	if not move in board.pseudo_legal_moves:
-		return False
-	board.push(move)
-	valid = board.is_valid()
-	board.pop()
-	return valid
-
+	
 def negaScout(board, alpha, beta, depth):
-	if board.result() != "*":
+	if depth == 0 or board.result() != "*":
 		return evaluate(board)
-	if depth == 0:
-		return quiescence(board, alpha, beta)
 
-	boundType = UPPER
 	item = load_tt(board.zobrist_hash(), alpha, beta, depth)
-	if item != None:
-		if item[0] != None:
-			return item[0]
-		elif isValid(board, item[1]):
-			board.push(item[1])
-			score = -negaScout(board, -beta, -alpha, depth - 1)
-			board.pop()
-
-			if score >= beta:
-				store_tt(board.zobrist_hash(), score, depth, item[1], LOWER)
-				return beta
-			elif score > alpha:
-				alpha = score
-				boundType = EXACT
+	if item != None and item[0] != None:
+		return item[0]
 
 	b = beta
 	c = 0
 	bestMove = None
+	boundType = UPPER
 	for i in board.legal_moves:
 		board.push(i)
 		score = -negaScout(board, -b, -alpha, depth - 1)
@@ -283,26 +226,10 @@ def evaluate(board):
 def heuristicX(board, wR, wN, wK, bK, bN):
 	score = 0
 	score += 9001 if board.result() == "1-0" else 0
-	if bool(wR): #Check to see if white rook exists
+	if len(wR) > 0: #Check to see if white rook exists
 		score += whiteDefRook(board, wR, wK)*2
 		score += whiteRookAtk(board, wR, bK)
 		
-		#Rook attacking around Black King
-		len(board.attacks(list(bK)[0]).intersection(board.attacks(list(wR)[0]))) * 2
-		
-		#defend rook with king
-		len(board.attacks(list(wK)[0]).intersection(wR)) * 2
-	
-	if bool(wN):
-		len(board.attacks(list(bK)[0]).intersection(board.attacks(list(wN)[0]))) * 4
-		
-		#defend night with king
-		len(board.attacks(list(wK)[0]).intersection(wN)) * 2
-		
-	if board.is_pinned(chess.BLACK, list(bK)[0]):
-		score += 40
-	
-	len(board.attacks(list(bK)[0]).intersection(board.attacks(list(wK)[0]))) * 5
 	score += wkMove2bk(wK, bK)*3
 	score -= len(board.move_stack)
 	score += len(board.attacks(list(wK)[0]))	
@@ -316,25 +243,26 @@ def heuristicY(board, wR, wN, wK, bK, bN):
 	score = 0
 	score += 9001 if board.result() == "0-1" else 0
 	score += 9001 if board.is_stalemate() else 0
+	score += len(bN) * 150
 	score += len(board.move_stack)
 	score += bKposition[list(bK)[0]]
 	score += len(board.attacks(list(bK)[0]))
 	
-	if bool(bN): 
-		score += 150
-		len(board.attacks(list(bK)[0]).intersection(bN)) * 6
-	
 	return score
 	
 def whiteDefRook(board, wr, wk):
+	score = 0
+	guard = board.attackers(chess.WHITE, list(wk)[0])
+	if len(guard) > 0:
+			score = 50 #King gaurding Rook
 	x = chess.rank_index(list(wr)[0]) - chess.rank_index(list(wk)[0])
 	y = chess.file_index(list(wr)[0]) - chess.file_index(list(wk)[0])
-	return 20-floor((y**2 + x**2)**(1/2))
+	return score + (20-floor((y**2 + x**2)**(1/2)))
 	
 def whiteRookAtk(board, wr, bk):
 	x = abs(chess.rank_index(list(wr)[0]) - chess.rank_index(list(bk)[0]))
 	y = abs(chess.file_index(list(wr)[0]) - chess.file_index(list(bk)[0]))
-	return 8-min(x,y)
+	return max(x,y)
 	
 def wkMove2bk(wk, bk):
 	x = chess.rank_index(list(wk)[0]) - chess.rank_index(list(bk)[0])
